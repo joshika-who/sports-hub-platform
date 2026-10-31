@@ -17,7 +17,10 @@ import asyncio
 import io
 import json
 import os
+import socket
+import subprocess
 import sys
+import time
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -30,8 +33,8 @@ WS_URL = BASE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/
 
 
 def log_step(step_num: int, title: str) -> None:
-    print(f"\n[STEP {step_num}] {title}")
-    print("-" * 70)
+    print(f"\n[STEP {step_num}] {title}", flush=True)
+    print("-" * 70, flush=True)
 
 
 def verify_schedule_constraints(timetable: list, min_rest_slots: int) -> None:
@@ -67,6 +70,46 @@ def verify_schedule_constraints(timetable: list, min_rest_slots: int) -> None:
             )
 
 
+def ensure_backend_running():
+    """If backend is not already listening on BASE_URL, spawn it on an available port for the test run."""
+    global BASE_URL, WS_URL
+    try:
+        r = httpx.get(f"{BASE_URL}/health", timeout=2.0)
+        if r.status_code == 200:
+            return None
+    except Exception:
+        pass
+
+    # Choose port 8000 if free, otherwise pick a free ephemeral port
+    port = 8000
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+    BASE_URL = f"http://127.0.0.1:{port}"
+    WS_URL = f"ws://127.0.0.1:{port}/ws/live"
+
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend"))
+    print(f"Starting local FastAPI server on {BASE_URL} in {backend_dir} ...", flush=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=backend_dir,
+    )
+    for _ in range(60):
+        time.sleep(0.5)
+        try:
+            r = httpx.get(f"{BASE_URL}/health", timeout=1.5)
+            if r.status_code == 200:
+                return proc
+        except Exception:
+            continue
+    proc.terminate()
+    raise RuntimeError("Backend failed to start within 30 seconds.")
+
+
 async def run_smoke_test() -> None:
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
         # ------------------------------------------------------------------
@@ -77,8 +120,8 @@ async def run_smoke_test() -> None:
         assert r_health.status_code == 200, f"Health check failed: {r_health.text}"
         r_docs = await client.get("/docs")
         assert r_docs.status_code == 200, "Swagger /docs did not return 200"
-        print(f"PASS: /health -> {r_health.json()}")
-        print("PASS: /docs -> HTTP 200")
+        print(f"PASS: /health -> {r_health.json()}", flush=True)
+        print("PASS: /docs -> HTTP 200", flush=True)
 
         # ------------------------------------------------------------------
         # 2. Register & Login
@@ -105,7 +148,7 @@ async def run_smoke_test() -> None:
             json={"email": unique_email, "password": "Passw0rd!"},
         )
         assert r_login.status_code == 200
-        print(f"PASS: Athlete registered & logged in ({unique_email})")
+        print(f"PASS: Athlete registered & logged in ({unique_email})", flush=True)
 
         # Login seeded Organizer
         r_org = await client.post(
@@ -124,7 +167,7 @@ async def run_smoke_test() -> None:
         assert r_ref.status_code == 200, f"Referee login failed: {r_ref.text}"
         ref_token = r_ref.json()["access_token"]
         ref_headers = {"Authorization": f"Bearer {ref_token}"}
-        print("PASS: Organizer and Referee logged in")
+        print("PASS: Organizer and Referee logged in", flush=True)
 
         # ------------------------------------------------------------------
         # 3. Create Event with ["MIN_AGE:18", "ID", "MEDICAL"] & Test Eligibility Fail -> Pass
@@ -152,12 +195,12 @@ async def run_smoke_test() -> None:
         assert r_elig1.status_code == 200
         elig1 = r_elig1.json()
         assert elig1["eligible"] is False, "Expected athlete without docs to be ineligible"
-        print(f"PASS: Initial eligibility is False ({len(elig1['checks'])} checks evaluated)")
+        print(f"PASS: Initial eligibility is False ({len(elig1['checks'])} checks evaluated)", flush=True)
 
         # Attempt registration while ineligible -> must return 422
         r_reg_fail = await client.post(f"/api/v1/events/{event_id}/register", headers=athlete_headers)
         assert r_reg_fail.status_code == 422, f"Expected 422 when ineligible, got {r_reg_fail.status_code}"
-        print("PASS: Registration blocked with HTTP 422 when ineligible")
+        print("PASS: Registration blocked with HTTP 422 when ineligible", flush=True)
 
         # Upload ID and MEDICAL documents
         doc_ids = []
@@ -186,7 +229,7 @@ async def run_smoke_test() -> None:
         r_elig2 = await client.get(f"/api/v1/events/{event_id}/eligibility", headers=athlete_headers)
         assert r_elig2.status_code == 200
         assert r_elig2.json()["eligible"] is True, f"Expected eligible=True after verification: {r_elig2.json()}"
-        print("PASS: Eligibility transitioned to True after Organizer verified ID & MEDICAL documents")
+        print("PASS: Eligibility transitioned to True after Organizer verified ID & MEDICAL documents", flush=True)
 
         # ------------------------------------------------------------------
         # 4. Register for Event -> Create Payment Intent -> Mock Complete -> Notification
@@ -224,7 +267,7 @@ async def run_smoke_test() -> None:
         assert r_notifs.status_code == 200
         notifs = r_notifs.json()
         assert any(n["kind"] == "REGISTRATION_CONFIRMED" for n in notifs), "Missing REGISTRATION_CONFIRMED notification"
-        print("PASS: Registration CONFIRMED and REGISTRATION_CONFIRMED notification delivered")
+        print("PASS: Registration CONFIRMED and REGISTRATION_CONFIRMED notification delivered", flush=True)
 
         # ------------------------------------------------------------------
         # 5. Court Booking & Double-Booking 409 Verification
@@ -251,7 +294,7 @@ async def run_smoke_test() -> None:
             json={"court_id": court_id, "slot_start": slot_dt.isoformat()},
         )
         assert r_book2.status_code == 409, f"Expected 409 Conflict on double booking, got {r_book2.status_code}"
-        print("PASS: First booking succeeded (201) and concurrent double-booking rejected with HTTP 409")
+        print("PASS: First booking succeeded (201) and concurrent double-booking rejected with HTTP 409", flush=True)
 
         # ------------------------------------------------------------------
         # 6. OR-Tools CP-SAT Scheduler (8 teams / 2 courts & 6 teams / 3 courts)
@@ -274,7 +317,8 @@ async def run_smoke_test() -> None:
         sched_8 = r_sched_8.json()
         verify_schedule_constraints(sched_8["timetable"], min_rest_slots=1)
         print(
-            f"PASS: 8 teams / 2 courts (single_elimination) -> {sched_8['total_matches']} matches across {sched_8['makespan_slots']} slots ({sched_8['solver_status']})"
+            f"PASS: 8 teams / 2 courts (single_elimination) -> {sched_8['total_matches']} matches across {sched_8['makespan_slots']} slots ({sched_8['solver_status']})",
+            flush=True,
         )
 
         # Case B: 6 teams, 3 courts, round_robin (15 matches) + commit to DB
@@ -294,7 +338,7 @@ async def run_smoke_test() -> None:
         assert r_sched_6.status_code == 201, f"6-team round_robin commit failed: {r_sched_6.text}"
         committed_matches = r_sched_6.json()
         assert len(committed_matches) == 15
-        print(f"PASS: 6 teams / 3 courts (round_robin) -> {len(committed_matches)} matches committed to DB")
+        print(f"PASS: 6 teams / 3 courts (round_robin) -> {len(committed_matches)} matches committed to DB", flush=True)
 
         # ------------------------------------------------------------------
         # 7. Injury AI Assistant RAG Streaming Query
@@ -302,7 +346,7 @@ async def run_smoke_test() -> None:
         log_step(7, "Testing Injury AI Assistant RAG Streaming Endpoint (/api/v1/injury/query)")
         r_inj_health = await client.get("/api/v1/injury/health")
         assert r_inj_health.status_code == 200
-        print(f"Injury AI Health: {r_inj_health.json()}")
+        print(f"Injury AI Health: {r_inj_health.json()}", flush=True)
 
         tokens_collected = []
         sources_collected = []
@@ -328,7 +372,10 @@ async def run_smoke_test() -> None:
         full_answer = "".join(tokens_collected)
         assert len(full_answer) > 50, "Injury AI answer was unexpectedly empty"
         assert len(sources_collected) > 0, "Injury AI did not return any RAG sources"
-        print(f"PASS: Streamed {len(full_answer)} chars with {len(sources_collected)} RAG sources ({[s['source'] for s in sources_collected]})")
+        print(
+            f"PASS: Streamed {len(full_answer)} chars with {len(sources_collected)} RAG sources ({[s['source'] for s in sources_collected]})",
+            flush=True,
+        )
 
         # ------------------------------------------------------------------
         # 8. Live Scores WebSocket Broadcast
@@ -359,18 +406,23 @@ async def run_smoke_test() -> None:
             assert ws_event["match"]["score_a"] == 21
             assert ws_event["match"]["score_b"] == 19
             print(
-                f"PASS: WebSocket received real-time SCORE_UPDATE -> {ws_event['match']['team_a']} {ws_event['match']['score_a']} - {ws_event['match']['score_b']} {ws_event['match']['team_b']}"
+                f"PASS: WebSocket received real-time SCORE_UPDATE -> {ws_event['match']['team_a']} {ws_event['match']['score_a']} - {ws_event['match']['score_b']} {ws_event['match']['team_b']}",
+                flush=True,
             )
 
-    print("\n" + "=" * 70)
-    print("ALL 8 END-TO-END SMOKE TEST SUITES PASSED SUCCESSFULLY!")
-    print("=" * 70)
+    print("\n" + "=" * 70, flush=True)
+    print("ALL 8 END-TO-END SMOKE TEST SUITES PASSED SUCCESSFULLY!", flush=True)
+    print("=" * 70, flush=True)
 
 
 if __name__ == "__main__":
+    spawned_proc = None
     try:
+        spawned_proc = ensure_backend_running()
         asyncio.run(run_smoke_test())
     except Exception as exc:
-        print(f"\nSMOKE TEST FAILED: {exc}", file=sys.stderr)
+        print(f"\nSMOKE TEST FAILED: {exc}", file=sys.stderr, flush=True)
         sys.exit(1)
-
+    finally:
+        if spawned_proc is not None:
+            spawned_proc.terminate()
