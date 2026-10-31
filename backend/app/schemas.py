@@ -188,9 +188,16 @@ class NotificationResponse(BaseModel):
 
 # --- Injury AI Schemas ---
 class InjuryQueryRequest(BaseModel):
-    question: str = Field(..., min_length=3, max_length=2000)
+    question: Optional[str] = Field(None, max_length=2000)
+    query: Optional[str] = Field(None, max_length=2000)
+    user_query: Optional[str] = Field(None, max_length=2000)
     sport: Optional[str] = None
     history: Optional[str] = None
+
+    def resolved_query(self) -> str:
+        base = (self.question or self.query or self.user_query or "").strip()
+        parts = [p for p in [self.sport, base, self.history] if p]
+        return " | ".join(parts) if parts else base
 
 
 # --- Scheduler Schemas ---

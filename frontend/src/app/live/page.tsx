@@ -10,7 +10,7 @@ import {
   ShieldCheck,
   Trophy,
 } from "lucide-react";
-import { apiFetch, LiveMatch, WS_BASE_URL } from "@/lib/api";
+import { apiFetch, getWsBaseUrl, LiveMatch } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 
 export default function LiveScoresPage() {
@@ -38,38 +38,51 @@ export default function LiveScoresPage() {
   useEffect(() => {
     loadMatches();
 
-    const ws = new WebSocket(`${WS_BASE_URL}/ws/live`);
-    wsRef.current = ws;
+    // Poll every 5s as a seamless fallback on serverless hosts (like Vercel)
+    const pollTimer = setInterval(loadMatches, 5000);
 
-    ws.onopen = () => {
-      setWsConnected(true);
-    };
+    try {
+      const wsBase = getWsBaseUrl();
+      if (wsBase) {
+        const ws = new WebSocket(`${wsBase}/ws/live`);
+        wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "SCORE_UPDATE" && msg.match) {
-          const updated: LiveMatch = msg.match;
-          setLastEventText(
-            `LIVE UPDATE: ${updated.team_a} ${updated.score_a} - ${updated.score_b} ${updated.team_b}`
-          );
-          setMatches((prev) => {
-            const exists = prev.some((m) => m.id === updated.id);
-            if (!exists) return [updated, ...prev];
-            return prev.map((m) => (m.id === updated.id ? updated : m));
-          });
-        }
-      } catch {
-        // ignore malformed frames
+        ws.onopen = () => {
+          setWsConnected(true);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "SCORE_UPDATE" && msg.match) {
+              const updated: LiveMatch = msg.match;
+              setLastEventText(
+                `LIVE UPDATE: ${updated.team_a} ${updated.score_a} - ${updated.score_b} ${updated.team_b}`
+              );
+              setMatches((prev) => {
+                const exists = prev.some((m) => m.id === updated.id);
+                if (!exists) return [updated, ...prev];
+                return prev.map((m) => (m.id === updated.id ? updated : m));
+              });
+            }
+          } catch {
+            // ignore malformed frames
+          }
+        };
+
+        ws.onclose = () => {
+          setWsConnected(false);
+        };
       }
-    };
-
-    ws.onclose = () => {
+    } catch {
       setWsConnected(false);
-    };
+    }
 
     return () => {
-      ws.close();
+      clearInterval(pollTimer);
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
   }, [loadMatches]);
 
@@ -81,7 +94,7 @@ export default function LiveScoresPage() {
   ) => {
     setUpdatingId(match.id);
     try {
-      await apiFetch<LiveMatch>(`/api/v1/live/matches/${match.id}/score`, {
+      const updated = await apiFetch<LiveMatch>(`/api/v1/live/matches/${match.id}/score`, {
         method: "PUT",
         body: JSON.stringify({
           score_a: Math.max(0, newScoreA),
@@ -89,6 +102,10 @@ export default function LiveScoresPage() {
           status: newStatus,
         }),
       });
+      setMatches((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+      setLastEventText(
+        `LIVE UPDATE: ${updated.team_a} ${updated.score_a} - ${updated.score_b} ${updated.team_b}`
+      );
     } finally {
       setUpdatingId(null);
     }
@@ -103,7 +120,7 @@ export default function LiveScoresPage() {
             Real-Time Match Center
           </h1>
           <p className="text-xs sm:text-sm text-slate-400 mt-1">
-            Connected to native FastAPI WebSocket (`/ws/live`). Score updates broadcast instantaneously to all browsers.
+            Live scoreboard with real-time updates.
           </p>
         </div>
 
@@ -112,11 +129,11 @@ export default function LiveScoresPage() {
             className={`inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-bold border ${
               wsConnected
                 ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                : "bg-sky-500/15 text-sky-300 border-sky-500/30"
             }`}
           >
-            <Radio className={`w-3.5 h-3.5 ${wsConnected ? "animate-pulse" : ""}`} />
-            {wsConnected ? "WebSocket Connected (/ws/live)" : "Reconnecting..."}
+            <Radio className="w-3.5 h-3.5 animate-pulse" />
+            {wsConnected ? "Live Stream Connected" : "Live Auto-Sync Active"}
           </span>
 
           <button
@@ -140,7 +157,7 @@ export default function LiveScoresPage() {
         <div className="p-3.5 rounded-xl bg-indigo-500/15 border border-indigo-500/30 text-xs text-indigo-200 flex items-center gap-2">
           <ShieldCheck className="w-4 h-4 text-indigo-400 shrink-0" />
           <span>
-            <strong>Official Scorekeeper Mode Active ({user?.role?.toUpperCase()}):</strong> Use the +1 / Finish controls on any match card below to broadcast live score changes over WebSocket.
+            <strong>Official Scorekeeper Mode Active ({user?.role?.toUpperCase()}):</strong> Use the +1 / Finish controls on any match card below to update live scores.
           </span>
         </div>
       )}
@@ -254,4 +271,3 @@ export default function LiveScoresPage() {
     </div>
   );
 }
-

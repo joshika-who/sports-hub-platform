@@ -1,7 +1,15 @@
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Always use same-origin relative paths (/api/...) so the website works on Vercel
+// and never tries to call "localhost" on a visitor's phone or computer.
+export const API_BASE_URL = "";
 
-export const WS_BASE_URL = API_BASE_URL.replace(/^http/, "ws");
+export function getWsBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return window.location.origin.replace(/^http/, "ws");
+  }
+  return "";
+}
+
+export const WS_BASE_URL = "";
 
 export interface ProfileMetrics {
   height?: number;
@@ -180,18 +188,39 @@ export async function apiFetch<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-  });
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${normalizedPath}`, {
+      ...options,
+      headers,
+    });
+  } catch {
+    throw new ApiError(
+      "We could not connect to the server right now. Please wait a few seconds and try again.",
+      0
+    );
+  }
 
   if (!res.ok) {
-    let errMsg = `HTTP ${res.status}`;
+    let errMsg =
+      res.status === 401
+        ? "That email or password did not match. Please double-check and try again."
+        : res.status === 404
+        ? "The requested service was not found on the server."
+        : res.status >= 500
+        ? "The server ran into a temporary problem. Please try again in a moment."
+        : `Something went wrong (Error ${res.status}). Please try again.`;
     let checks: EligibilityCheckItem[] | undefined = undefined;
     try {
       const data = await res.json();
       if (typeof data.detail === "string") {
         errMsg = data.detail;
+      } else if (Array.isArray(data.detail) && data.detail.length > 0) {
+        errMsg =
+          data.detail[0]?.msg ||
+          "Please check all fields and make sure your email and password are valid.";
       } else if (data.detail && typeof data.detail === "object") {
         errMsg = data.detail.message || JSON.stringify(data.detail);
         if (Array.isArray(data.detail.checks)) {
@@ -199,7 +228,7 @@ export async function apiFetch<T>(
         }
       }
     } catch {
-      // ignore json parse failure
+      // keep friendly default message if response body is not JSON
     }
     throw new ApiError(errMsg, res.status, checks);
   }
@@ -211,4 +240,3 @@ export function formatINR(paise: number): string {
   if (!paise || paise <= 0) return "Free";
   return `₹${(paise / 100).toFixed(0)}`;
 }
-

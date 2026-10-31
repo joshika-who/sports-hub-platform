@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,12 +16,13 @@ from app.services.auth_vault.router import auth_router, vault_router
 from app.services.bookings.router import router as bookings_router
 from app.services.events.router import router as events_router
 from app.services.injury_ai.rag import rag_store
-from app.services.injury_ai.router import router as injury_router
+from app.services.injury_ai.router import injury_health, router as injury_router
 from app.services.live.router import router as live_router
 from app.services.notifications.dispatcher import match_reminder_background_task
 from app.services.notifications.router import router as notifications_router
 from app.services.payments.router import router as payments_router
 from app.services.scheduler.router import router as scheduler_router
+from services.injury_ai_service.rag_engine import index_knowledge_base
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,32 +30,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger("sportshub.main")
 
+_INITIALIZED = False
+
+
+def ensure_platform_initialized() -> None:
+    """
+    Idempotently creates database tables, seeds demo accounts/events, and indexes the
+    safety knowledge base. Safe to call both in ASGI lifespan and on serverless cold start.
+    """
+    global _INITIALIZED
+    if _INITIALIZED:
+        return
+    try:
+        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            seed_database(db)
+        rag_store.initialize()
+        index_knowledge_base()
+        _INITIALIZED = True
+        logger.info(
+            "Sports Hub Platform initialized (DB=%s, Cache=%s, PaymentMode=%s, NotifyMode=%s)",
+            ACTIVE_DB_BACKEND,
+            cache.backend_name,
+            settings.PAYMENT_MODE,
+            settings.NOTIFY_MODE,
+        )
+    except Exception as exc:
+        logger.error("Initialization warning: %s", exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Create database tables automatically
-    Base.metadata.create_all(bind=engine)
-    # 2. Seed initial demo data idempotently
-    with SessionLocal() as db:
-        seed_database(db)
-    # 3. Initialize ChromaDB / Injury RAG corpus
-    rag_store.initialize()
-    # 4. Start background task for 1-hour match reminders
-    reminder_task = asyncio.create_task(match_reminder_background_task())
-    logger.info(
-        "Sports Hub Platform started (DB=%s, Cache=%s, PaymentMode=%s, NotifyMode=%s)",
-        ACTIVE_DB_BACKEND,
-        cache.backend_name,
-        settings.PAYMENT_MODE,
-        settings.NOTIFY_MODE,
-    )
+    ensure_platform_initialized()
+    reminder_task = None
+    if not os.environ.get("VERCEL"):
+        reminder_task = asyncio.create_task(match_reminder_background_task())
     yield
-    reminder_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await reminder_task
+    if reminder_task is not None:
+        reminder_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reminder_task
 
 
 def create_app() -> FastAPI:
+    ensure_platform_initialized()
+
     app = FastAPI(
         title=settings.APP_NAME,
         version="1.0.0",
@@ -74,8 +95,8 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RequestLoggingAndRateLimitMiddleware, max_requests_per_minute=600)
 
-    # Mount static uploads directory for viewing uploaded document references
-    app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
+    if os.path.isdir(settings.UPLOAD_DIR):
+        app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
     # Mount all service routers
     app.include_router(auth_router)
@@ -89,6 +110,7 @@ def create_app() -> FastAPI:
     app.include_router(live_router)
 
     @app.get("/health", tags=["System"])
+    @app.get("/api/health", tags=["System"])
     @app.get("/api/v1/health", tags=["System"])
     def health_check():
         return {
@@ -98,11 +120,17 @@ def create_app() -> FastAPI:
             "cache_backend": cache.backend_name,
             "payment_mode": settings.PAYMENT_MODE,
             "notify_mode": settings.NOTIFY_MODE,
+            "ollama_url": settings.OLLAMA_URL,
+            "ollama_model": settings.OLLAMA_MODEL,
             "rag_chunks_indexed": rag_store.indexed_count,
         }
+
+    @app.get("/ai/health", tags=["System"])
+    @app.get("/api/v1/ai/health", tags=["System"])
+    async def ai_health_alias():
+        return await injury_health()
 
     return app
 
 
 app = create_app()
-

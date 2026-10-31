@@ -1,6 +1,33 @@
 import os
+import tempfile
 from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _is_serverless_or_readonly() -> bool:
+    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return True
+    test_dir = os.path.dirname(os.path.dirname(__file__))
+    return not os.access(test_dir, os.W_OK)
+
+
+_USE_TMP = _is_serverless_or_readonly()
+_TMP_ROOT = tempfile.gettempdir()
+_DEFAULT_SQLITE_PATH = (
+    os.path.join(_TMP_ROOT, "sportshub.db").replace("\\", "/")
+    if _USE_TMP
+    else "./sportshub.db"
+)
+_DEFAULT_UPLOAD_DIR = (
+    os.path.join(_TMP_ROOT, "sportshub_uploads")
+    if _USE_TMP
+    else os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+)
+_DEFAULT_CHROMA_DIR = (
+    os.path.join(_TMP_ROOT, "sportshub_chroma")
+    if _USE_TMP
+    else os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_data")
+)
 
 
 class Settings(BaseSettings):
@@ -16,20 +43,20 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "super-secret-jwt-key-change-in-production-9f8e7d6c5b4a3210"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000", "*"]
+    CORS_ORIGINS: List[str] = ["*"]
 
     # Database & Redis
-    DATABASE_URL: str = "sqlite:///./sportshub.db"
-    REDIS_URL: str = "redis://localhost:6379/0"
+    DATABASE_URL: str = f"sqlite:///{_DEFAULT_SQLITE_PATH}"
+    REDIS_URL: str = ""
 
     # Uploads
-    UPLOAD_DIR: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
+    UPLOAD_DIR: str = _DEFAULT_UPLOAD_DIR
 
     # AI (Ollama + ChromaDB)
     OLLAMA_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "gemma3:1b"
-    OLLAMA_TIMEOUT_SECONDS: int = 20
-    CHROMA_PERSIST_DIR: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_data")
+    OLLAMA_TIMEOUT_SECONDS: int = 8
+    CHROMA_PERSIST_DIR: str = _DEFAULT_CHROMA_DIR
 
     # Payments (mock | live)
     PAYMENT_MODE: str = "mock"
@@ -54,5 +81,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-
+try:
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+except Exception:
+    settings.UPLOAD_DIR = os.path.join(_TMP_ROOT, "sportshub_uploads")
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

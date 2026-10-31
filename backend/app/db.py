@@ -1,4 +1,6 @@
 import logging
+import os
+import tempfile
 from typing import Generator
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -7,7 +9,15 @@ from app.config import settings
 
 logger = logging.getLogger("sportshub.db")
 
-SQLITE_FALLBACK_URL = "sqlite:///./sportshub.db"
+
+def _get_writable_sqlite_url() -> str:
+    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        tmp_db = os.path.join(tempfile.gettempdir(), "sportshub.db").replace("\\", "/")
+        return f"sqlite:///{tmp_db}"
+    return "sqlite:///./sportshub.db"
+
+
+SQLITE_FALLBACK_URL = _get_writable_sqlite_url()
 ACTIVE_DB_BACKEND = "sqlite"
 
 
@@ -17,13 +27,27 @@ def _build_engine():
     if not db_url:
         db_url = SQLITE_FALLBACK_URL
 
+    # On Vercel/serverless, if someone left "./sportshub.db" in env, redirect to writable /tmp
+    if (os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")) and db_url == "sqlite:///./sportshub.db":
+        db_url = SQLITE_FALLBACK_URL
+
     if db_url.startswith("sqlite"):
         ACTIVE_DB_BACKEND = "sqlite"
-        return create_engine(
-            db_url,
-            connect_args={"check_same_thread": False},
-            pool_pre_ping=True,
-        )
+        try:
+            eng = create_engine(
+                db_url,
+                connect_args={"check_same_thread": False},
+                pool_pre_ping=True,
+            )
+            with eng.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return eng
+        except Exception:
+            return create_engine(
+                SQLITE_FALLBACK_URL,
+                connect_args={"check_same_thread": False},
+                pool_pre_ping=True,
+            )
 
     # Attempt PostgreSQL (or custom DB URL) connection with automatic fallback to SQLite
     try:
@@ -59,4 +83,3 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
-
