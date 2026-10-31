@@ -277,7 +277,7 @@ async def run_smoke_test() -> None:
         assert r_courts.status_code == 200
         court_id = r_courts.json()[0]["id"]
 
-        slot_dt = (datetime.now(timezone.utc) + timedelta(days=3)).replace(
+        slot_dt = (datetime.now(timezone.utc) + timedelta(days=int(uuid.uuid4().int % 900) + 10)).replace(
             hour=10, minute=0, second=0, microsecond=0, tzinfo=None
         )
         r_book1 = await client.post(
